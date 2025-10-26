@@ -1,14 +1,31 @@
 from app.models import TimeStampModelMixin
 from django.db import models
+from app.models import TimeStampModelMixin
+
 import uuid
 
 class ScamRecord(TimeStampModelMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     phone_number = models.CharField(max_length=10)
-    reported_by = models.ForeignKey('User', on_delete=models.SET_NULL, related_name='scam_records', null=True)
-    description = models.CharField()
-    created_by = models.ForeignKey('User', on_delete=models.SET_NULL, related_name='created_scam_records', null=True)
-    updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, related_name='updated_scam_records', null=True)
+    reported_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        related_name='scam_records',
+        null=True
+    )
+    description = models.CharField(max_length=255, blank=True, null=True)
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        related_name='created_scam_records',
+        null=True
+    )
+    updated_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        related_name='updated_scam_records',
+        null=True
+    )
 
     class Meta:
         constraints = [
@@ -17,3 +34,6 @@ class ScamRecord(TimeStampModelMixin):
                 name="unique_phone_number_reported_by",
             ),
         ]
+
+    def __str__(self):
+        return f"{self.phone_number} reported by {self.reported_by}"

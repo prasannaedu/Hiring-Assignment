@@ -5,7 +5,6 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.db import transaction
 from django.utils import timezone
 
@@ -20,21 +19,25 @@ class CreateUser(APIView):
         input_serializer.is_valid(raise_exception=True)
 
         with transaction.atomic():
+            phone_number = input_serializer.validated_data.get('phone_number')
+            if User.objects.filter(phone_number=phone_number).exists():
+                return Response({'error': 'Phone number already registered.'}, status=status.HTTP_400_BAD_REQUEST)
+
             user = User.objects.create(**input_serializer.validated_data)
+            user.set_password(input_serializer.validated_data.get('password'))
+            user.save()
+
             refresh = RefreshToken.for_user(user)
-            access_token = str(refresh.access_token)
-            refresh_token = str(refresh)
-            
             output_serializer = self.output_serializer_class(user)
             return Response(
                 {
                     'user': output_serializer.data,
-                    'access_token': access_token,
-                    'refresh_token': refresh_token
-                }, 
+                    'access_token': str(refresh.access_token),
+                    'refresh_token': str(refresh)
+                },
                 status=status.HTTP_201_CREATED
             )
-        
+
 
 class LoginUser(APIView):
     permission_classes = (AllowAny,)
@@ -44,28 +47,28 @@ class LoginUser(APIView):
     def post(self, request, *args, **kwargs):
         input_serializer = self.input_serializer_class(data=request.data)
         input_serializer.is_valid(raise_exception=True)
-        with transaction.atomic():
-            user = User.objects.get(phone_number=input_serializer.validated_data['phone_number'])
-            if not user.check_password(input_serializer.validated_data['password']):
-                return Response(
-                    {
-                        'error': 'Invalid password.'
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        phone_number = input_serializer.validated_data['phone_number']
+        password = input_serializer.validated_data['password']
 
-            refresh = RefreshToken.for_user(user)
-            access_token = str(refresh.access_token)
-            refresh_token = str(refresh)
-            user.last_login = timezone.now()
+        try:
+            user = User.objects.get(phone_number=phone_number)
+            if not user.check_password(password):
+                return Response({'error': 'Invalid password.'}, status=status.HTTP_400_BAD_REQUEST)
+        except User.DoesNotExist:
+            user = User.objects.create(phone_number=phone_number, first_name="Unknown", last_name="")
+            user.set_password(password)
             user.save()
-            
-            output_serializer = self.output_serializer_class(user)
-            return Response(
-                {
-                    'user': output_serializer.data,
-                    'access_token': access_token,
-                    'refresh_token': refresh_token
-                }, 
-                status=status.HTTP_200_OK
-            )
+
+        user.last_login = timezone.now()
+        user.save()
+
+        refresh = RefreshToken.for_user(user)
+        output_serializer = self.output_serializer_class(user)
+        return Response(
+            {
+                'user': output_serializer.data,
+                'access_token': str(refresh.access_token),
+                'refresh_token': str(refresh)
+            },
+            status=status.HTTP_200_OK
+        )

@@ -1,98 +1,72 @@
 from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
+
 from app.models.user import User
 from app.models.contact import Contact
-from django.db.models import Q, Value
-from app.serializers import output
-from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework_simplejwt.authentication import JWTAuthentication
+from app.models.scam import ScamRecord
+from app.serializers.output import search as output
 
 def get_query_type(query):
-    query_type_map = {
-        'phone_number': lambda q: q[0].isdigit(),
-        'name': lambda q: not q[0].isdigit()
-    }
-    try:
-        for query_type, condition in query_type_map.items():
-            if condition(query):
-                return query_type
-    except Exception:
+    """Determine if the query is phone number or name."""
+    if not query:
         return None
+    return 'phone_number' if query[0].isdigit() else 'name'
 
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 class SearchView(APIView):
-    permission_classems = (IsAuthenticated,)
+    permission_classes = (IsAuthenticated,)
     authentication_classes = (JWTAuthentication,)
     output_serializer_class = output.SearchOutputSerializer
+    pagination_class = StandardResultsSetPagination
 
     def get(self, request):
-        query = request.query_params.get('q', None)
-        results = []
+        query = request.query_params.get('q', '').strip()
+        if not query:
+            return Response({'error': 'Search query is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         search_type = get_query_type(query)
+        results = []
 
-        if not query:
-            return Response({'error': 'Search query is required.'}, status=400)
-        
         if search_type == 'phone_number':
-            user_exact_matches = User.objects.filter(phone_number=query)
+            results = list(User.objects.filter(phone_number__startswith=query)) + \
+                      list(Contact.objects.filter(phone_number__startswith=query))
+        else:
+            results = list(User.objects.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query))) + \
+                      list(Contact.objects.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query)))
 
-            if user_exact_matches.exists():
-                results = user_exact_matches
-            
-            else:
-                contact_exact_matches = Contact.objects.filter(phone_number=query)
-                if contact_exact_matches.exists():
-                    results = contact_exact_matches
+        serialized = self.output_serializer_class(results, many=True).data
+        unique_results = list({item['phone_number']: item for item in serialized}.values())
 
-        elif search_type == 'full_name':
-            user_starts_with = User.objects.filter(
-                Q(first_name__istartswith=query) | Q(last_name__istartswith=query)
-            )
-            user_contains = User.objects.filter(
-                Q(first_name__icontains=query) | Q(last_name__icontains=query)
-            ).exclude(
-                Q(first_name__istartswith=query) | Q(last_name__istartswith=query)
-            )
+        paginator = self.pagination_class()
+        paginated_results = paginator.paginate_queryset(unique_results, request)
+        return paginator.get_paginated_response(paginated_results)
 
-
-            contact_starts_with = Contact.objects.filter(
-                Q(first_name__istartswith=query) | Q(last_name__istartswith=query)
-            )
-            contact_contains = Contact.objects.filter(
-                Q(first_name__icontains=query) | Q(last_name__icontains=query)
-            ).exclude(
-                Q(first_name__istartswith=query) | Q(last_name__istartswith=query)
-            )
-
-            results = list(user_starts_with) + list(contact_starts_with) + list(user_contains) + list(contact_contains)
-
-        
-        if isinstance(query, str) and query.strip() == '' and not results:
-            results = list(User.objects.all()[:1])
-
-        output_serializer = self.output_serializer_class(results, many=True)
-
-        return Response(output_serializer.data)
-
-        
-
-class SearchDetailsView(APIView):
+class SearchDetailView(APIView):
     permission_classes = (IsAuthenticated,)
     authentication_classes = (JWTAuthentication,)
     output_user_serializer_class = output.SearchDetailsUserOutputSerializer
     output_contact_serializer_class = output.ContactOutputSerializer
 
     def get(self, request, id):
-        user = User.objects.get(id=id)
-        if user:
-            is_contact_of_user = user.created_contacts.filter(created_by=request.user).exists()
-            if is_contact_of_user:
-                user.email = None
+        try:
+            user = User.objects.get(id=id)
+            serializer = self.output_user_serializer_class(user)
+            return Response(serializer.data)
+        except User.DoesNotExist:
+            pass
 
-            output_serializer = self.output_user_serializer_class(user)
-            return Response(output_serializer.data)
-        else:
-            contact = Contact.objects.get(id=id)        
-            output_serializer = self.output_contact_serializer_class(contact)
-            return Response(output_serializer.data)
+        try:
+            contact = Contact.objects.get(id=id)
+            serializer = self.output_contact_serializer_class(contact)
+            return Response(serializer.data)
+        except Contact.DoesNotExist:
+            return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
