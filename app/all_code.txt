@@ -1,0 +1,335 @@
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
+
+from app.models.user import User
+from app.models.contact import Contact
+from app.models.scam import ScamRecord
+from app.serializers import output
+
+
+def get_query_type(query):
+    """Determine if the query is phone number or name."""
+    if not query:
+        return None
+    return 'phone_number' if query[0].isdigit() else 'name'
+
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class SearchView(APIView):
+    permission_classes = (IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+    output_serializer_class = output.SearchOutputSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get(self, request):
+        query = request.query_params.get('q', '').strip()
+        if not query:
+            return Response({'error': 'Search query is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        search_type = get_query_type(query)
+        results = []
+
+        if search_type == 'phone_number':
+            results = list(User.objects.filter(phone_number=query)) + list(Contact.objects.filter(phone_number=query))
+        else:  # search by name
+            user_results = User.objects.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query))
+            contact_results = Contact.objects.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query))
+            results = list(user_results) + list(contact_results)
+
+        # Serialize and remove duplicates by phone_number
+        serialized = self.output_serializer_class(results, many=True).data
+        unique_results = list({item['phone_number']: item for item in serialized}.values())
+
+        # Paginate
+        paginator = self.pagination_class()
+        paginated_results = paginator.paginate_queryset(unique_results, request)
+        return paginator.get_paginated_response(paginated_results)
+
+
+class SearchDetailsView(APIView):
+    permission_classes = (IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+    output_user_serializer_class = output.SearchDetailsUserOutputSerializer
+    output_contact_serializer_class = output.ContactOutputSerializer
+
+    def get(self, request, id):
+        # Try to get user first
+        try:
+            user = User.objects.get(id=id)
+            serializer = self.output_user_serializer_class(user)
+            return Response(serializer.data)
+        except User.DoesNotExist:
+            pass
+
+        # Try to get contact
+        try:
+            contact = Contact.objects.get(id=id)
+            serializer = self.output_contact_serializer_class(contact)
+            return Response(serializer.data)
+        except Contact.DoesNotExist:
+            return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from app.serializers import input, output
+from app.models.contact import Contact
+from django.db import transaction
+
+
+class CreateContact(APIView):
+    permission_classes = (IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+
+    input_serializer_class = input.CreateContactInputSerializer
+    output_serializer_class = output.ContactOutputSerializer
+
+    def post(self, request):
+        input_serializer = self.input_serializer_class(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        user = request.user
+        with transaction.atomic():
+            try: 
+                contact = Contact.objects.create(
+                    created_by=user,
+                    updated_by=user,
+                    **input_serializer.validated_data
+                )
+                output_serializer = self.output_serializer_class(contact)
+            except Exception as e:
+                return Response({'error': str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            return Response(output_serializer.data, status=status.HTTP_201_CREATED)from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from app.serializers import input, output
+from app.models.scam import ScamRecord
+from django.db import transaction
+
+class CreateScamRecord(APIView):
+    permission_classes = (IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+
+    input_serializer_class = input.CreateScamRecordInputSerializer
+    output_serializer_class = output.ScamRecordOutputSerializer
+
+    def post(self, request):
+        input_serializer = self.input_serializer_class(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        user = request.user
+        with transaction.atomic():
+            try:
+                scam = ScamRecord.objects.create(
+                    reported_by=user,
+                    created_by=user,
+                    updated_by=user,
+                    **input_serializer.validated_data
+                )
+                output_serializer = self.output_serializer_class(scam)
+            except Exception as e:
+                return Response({'error': str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            return Response(output_serializer.data, status=status.HTTP_201_CREATED)from rest_framework.response import Response
+from app.serializers import input, output
+from app.models.user import User
+from rest_framework.views import APIView
+from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from django.db import transaction
+from django.utils import timezone
+
+class CreateUser(APIView):
+    permission_classes = (AllowAny,)
+    input_serializer_class = input.CreateUserInputSerializer
+    output_serializer_class = output.UserOutputSerializer
+
+    def post(self, request, *args, **kwargs):
+        input_serializer = self.input_serializer_class(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            # Ensure unique phone number
+            phone_number = input_serializer.validated_data.get('phone_number')
+            if User.objects.filter(phone_number=phone_number).exists():
+                return Response({'error': 'Phone number already registered.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            user = User.objects.create(**input_serializer.validated_data)
+            user.set_password(input_serializer.validated_data.get('password'))
+            user.save()
+
+            refresh = RefreshToken.for_user(user)
+            output_serializer = self.output_serializer_class(user)
+            return Response(
+                {
+                    'user': output_serializer.data,
+                    'access_token': str(refresh.access_token),
+                    'refresh_token': str(refresh)
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+
+class LoginUser(APIView):
+    permission_classes = (AllowAny,)
+    input_serializer_class = input.LoginUserInputSerializer
+    output_serializer_class = output.UserOutputSerializer
+
+    def post(self, request, *args, **kwargs):
+        input_serializer = self.input_serializer_class(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        phone_number = input_serializer.validated_data['phone_number']
+        password = input_serializer.validated_data['password']
+
+        try:
+            user = User.objects.get(phone_number=phone_number)
+            if not user.check_password(password):
+                return Response({'error': 'Invalid password.'}, status=status.HTTP_400_BAD_REQUEST)
+        except User.DoesNotExist:
+            # Auto-create user if not exists
+            user = User.objects.create(phone_number=phone_number, first_name="Unknown", last_name="")
+            user.set_password(password)
+            user.save()
+
+        user.last_login = timezone.now()
+        user.save()
+
+        refresh = RefreshToken.for_user(user)
+        output_serializer = self.output_serializer_class(user)
+        return Response(
+            {
+                'user': output_serializer.data,
+                'access_token': str(refresh.access_token),
+                'refresh_token': str(refresh)
+            },
+            status=status.HTTP_200_OK
+        )
+from rest_framework import serializers
+from app.models.user import User
+from app.models.contact import Contact
+from app.models.scam import ScamRecord
+
+class SearchOutputSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.SerializerMethodField()
+    is_registered = serializers.SerializerMethodField()
+    spammed_by_count = serializers.SerializerMethodField()
+    phone_number = serializers.CharField()
+
+    def get_name(self, obj):
+        if isinstance(obj, User) or isinstance(obj, Contact):
+            return obj.get_full_name()
+
+    def get_is_registered(self, obj):
+        return isinstance(obj, User)
+
+    def get_spammed_by_count(self, obj):
+        if isinstance(obj, User) or isinstance(obj, Contact):
+            phone_number = obj.phone_number
+        else:
+            return 0
+        
+        return ScamRecord.objects.filter(phone_number=phone_number).count()
+    
+
+class SearchDetailsUserOutputSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    spammed_by_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id', 
+            'first_name', 
+            'last_name', 
+            'full_name', 
+            'spammed_by_count',
+            'email', 
+            'phone_number', 
+        )
+
+    def get_spammed_by_count(self, obj: User):
+        return ScamRecord.objects.filter(phone_number=obj.phone_number).count()
+
+    def get_full_name(self, obj: User):
+        return obj.get_full_name()
+from rest_framework import serializers
+from app.models.contact import Contact
+from app.models.scam import ScamRecord
+
+class ContactOutputSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    spammed_by_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Contact
+        fields = (
+            'id', 
+            'first_name', 
+            'last_name', 
+            'full_name', 
+            'spammed_by_count',
+            'phone_number', 
+        )
+
+    def get_spammed_by_count(self, obj: Contact):
+        return ScamRecord.objects.filter(phone_number=obj.phone_number).count()
+
+    def get_full_name(self, obj: Contact):
+        return obj.get_full_name()from rest_framework import serializers
+from app.models.scam import ScamRecord
+from app.serializers.output import UserOutputSerializer
+
+class ScamRecordOutputSerializer(serializers.ModelSerializer):
+    reported_by = UserOutputSerializer()
+    spammed_by_count = serializers.SerializerMethodField()
+    class Meta:
+        model = ScamRecord
+        fields = (
+            'id',
+            'phone_number',
+            'spammed_by_count',
+            'description',
+            'reported_by',
+            'created_at',
+            'updated_at'
+        )
+
+    def get_spammed_by_count(self, obj: ScamRecord):
+        return ScamRecord.objects.filter(phone_number=obj.phone_number).count()from rest_framework import serializers
+from app.models.user import User
+
+class UserOutputSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id', 
+            'first_name', 
+            'last_name', 
+            'full_name', 
+            'email', 
+            'phone_number', 
+        )
+
+    def get_full_name(self, obj: User):
+        return obj.get_full_name()

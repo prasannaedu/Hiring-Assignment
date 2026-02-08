@@ -1,3 +1,4 @@
+# app/serializers/output/user.py
 from rest_framework import serializers
 from app.models.user import User
 
@@ -6,14 +7,7 @@ class UserOutputSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = (
-            'id', 
-            'first_name', 
-            'last_name', 
-            'full_name', 
-            'email', 
-            'phone_number', 
-        )
+        fields = ('id', 'first_name', 'last_name', 'full_name', 'email', 'phone_number')
 
-    def get_full_name(self, obj: User):
+    def get_full_name(self, obj):
         return obj.get_full_name()
